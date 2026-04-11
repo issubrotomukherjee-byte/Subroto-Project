@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, Float, String, Date, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from database.base import Base
 
@@ -12,6 +12,8 @@ class Inventory(Base):
     quantity = Column(Integer, default=0)
     batch_no = Column(String, nullable=False)
     expiry_date = Column(Date, nullable=False)
+    mrp = Column(Float, nullable=False)
+    purchase_price = Column(Float, nullable=False)
 
     # Each (store, medicine, batch) combo must be unique
     __table_args__ = (

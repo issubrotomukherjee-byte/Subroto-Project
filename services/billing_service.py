@@ -8,6 +8,7 @@ from models.medicine import Medicine
 from models.inventory import Inventory
 from schemas.order_schema import OrderCreate, OrderAddItems, OrderItemCreate
 from services.loyalty_service import add_points, get_membership_discount
+from services.fefo_service import get_available_batches, apply_fefo, calculate_total, reduce_stock
 
 
 # ── helpers ──────────────────────────────────────────────
@@ -17,70 +18,43 @@ def _deduct_inventory(
     store_id: int,
     item: OrderItemCreate,
     order_item: OrderItem,
-) -> float:
-    """Validate stock and deduct using FEFO (First Expiry, First Out).
+) -> dict:
+    """Validate stock and deduct using FEFO via the modular fefo_service.
 
-    Rules
-    -----
-    1. Expired batches (expiry_date < today) are excluded.
-    2. Remaining valid batches are consumed earliest-expiry-first.
-    3. If the requested quantity spans multiple batches, the deduction
-       is split across them automatically.
-    4. Every individual batch deduction is recorded in `order_item_batches`
-       for return processing and audit.
-    5. Raises HTTP 400 if total valid stock is insufficient.
+    Returns a dict with batch-level pricing aggregated across consumed
+    batches::
+
+        {
+            "subtotal":            <sum of batch_mrp × qty_from_that_batch>,
+            "total_purchase_cost": <sum of batch_purchase_price × qty_from_that_batch>,
+            "first_batch_mrp":     <mrp of earliest-expiry batch consumed>,
+        }
     """
-    medicine = db.query(Medicine).filter(Medicine.id == item.medicine_id).first()
-    if not medicine:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Medicine {item.medicine_id} not found",
-        )
+    # 1. Fetch FEFO-sorted batches
+    batches = get_available_batches(db, store_id, item.medicine_id)
 
-    today = date.today()
+    # 2. Build allocation plan (pure logic, no DB mutation)
+    allocations = apply_fefo(batches, item.quantity)
 
-    # Get all NON-EXPIRED, in-stock batches sorted by expiry (earliest first)
-    batches = (
-        db.query(Inventory)
-        .filter(
-            Inventory.store_id == store_id,
-            Inventory.medicine_id == item.medicine_id,
-            Inventory.quantity > 0,
-            Inventory.expiry_date >= today,          # ← skip expired stock
-        )
-        .order_by(Inventory.expiry_date.asc())
-        .all()
-    )
+    # 3. Calculate totals using batch-level MRP
+    totals = calculate_total(allocations)
 
-    total_available = sum(b.quantity for b in batches)
-    if total_available < item.quantity:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Insufficient valid stock for medicine {item.medicine_id}. "
-                f"Requested {item.quantity}, available (non-expired) {total_available}."
-            ),
-        )
+    # 4. Deduct stock from inventory
+    reduce_stock(db, allocations)
 
-    # Deduct from earliest-expiry batches first, recording each split
-    remaining = item.quantity
-    for batch in batches:
-        if remaining <= 0:
-            break
-
-        deduct = min(batch.quantity, remaining)
-        batch.quantity -= deduct
-        remaining -= deduct
-
-        # Audit record: which batch supplied how many units
+    # 5. Create audit records (which batch supplied how many units)
+    for alloc in allocations:
         db.add(OrderItemBatch(
             order_item_id=order_item.id,
-            inventory_id=batch.id,
-            quantity=deduct,
+            inventory_id=alloc["batch_id"],
+            quantity=alloc["allocated_qty"],
         ))
 
-    subtotal = medicine.price * item.quantity
-    return subtotal
+    return {
+        "subtotal": totals["total_price"],
+        "total_purchase_cost": totals["total_purchase_cost"],
+        "first_batch_mrp": allocations[0]["mrp"],
+    }
 
 
 def _add_items_to_order(db: Session, order: Order, items: list[OrderItemCreate]):
@@ -93,21 +67,36 @@ def _add_items_to_order(db: Session, order: Order, items: list[OrderItemCreate])
                 detail=f"Medicine {item.medicine_id} not found",
             )
 
-        # Create the order item first so we have its id for batch records
+        # Create the order item first so we have its id for batch records.
+        # Placeholder values are overwritten after inventory deduction.
         order_item = OrderItem(
             order_id=order.id,
             medicine_id=item.medicine_id,
             quantity=item.quantity,
-            unit_price=medicine.price,
-            subtotal=medicine.price * item.quantity,
+            unit_price=0.0,       # updated below
+            subtotal=0.0,         # updated below
+            mrp=0.0,              # updated below
+            purchase_price=0.0,   # updated below
+            discount_applied=0.0,
+            final_price=0.0,      # updated below
+            profit=0.0,           # updated below
         )
         db.add(order_item)
         db.flush()  # populate order_item.id
 
         # Deduct inventory and create batch audit records
-        subtotal = _deduct_inventory(db, order.store_id, item, order_item)
-        order_item.subtotal = subtotal
-        order.total_amount += subtotal
+        pricing = _deduct_inventory(db, order.store_id, item, order_item)
+
+        # Fill in pricing from batch-level data
+        order_item.unit_price = pricing["first_batch_mrp"]
+        order_item.subtotal = pricing["subtotal"]
+        order_item.mrp = pricing["first_batch_mrp"]
+        order_item.purchase_price = pricing["total_purchase_cost"] / item.quantity
+        order_item.discount_applied = 0.0
+        order_item.final_price = pricing["subtotal"]
+        order_item.profit = pricing["subtotal"] - pricing["total_purchase_cost"]
+
+        order.total_amount += pricing["subtotal"]
 
     return order
 
@@ -142,6 +131,13 @@ def create_order(db: Session, data: OrderCreate):
             if discount_pct > 0:
                 discount_amt = order.total_amount * (discount_pct / 100)
                 order.total_amount -= discount_amt
+
+                # Distribute discount proportionally across items
+                for oi in order.items:
+                    item_share = (oi.subtotal / (order.total_amount + discount_amt)) * discount_amt
+                    oi.discount_applied = round(item_share, 2)
+                    oi.final_price = round(oi.subtotal - oi.discount_applied, 2)
+                    oi.profit = round(oi.final_price - (oi.purchase_price * oi.quantity), 2)
 
             # Award loyalty points (1% of final total)
             add_points(db, data.customer_id, order.total_amount, order.id)
@@ -202,4 +198,3 @@ def get_order_total(db: Session, order_id: int):
 def list_orders(db: Session):
     """Return all orders."""
     return db.query(Order).all()
-
