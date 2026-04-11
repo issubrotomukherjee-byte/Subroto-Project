@@ -10,6 +10,7 @@ class Medicine(Base):
     name = Column(String, nullable=False, index=True)
     salt = Column(String, nullable=True)
     price = Column(Float, nullable=False)
+    units_per_strip = Column(Integer, default=10, nullable=False)
 
     # One medicine → many inventory entries (one per store)
     inventory = relationship("Inventory", back_populates="medicine")

@@ -7,7 +7,11 @@ from schemas.inventory_schema import InventoryCreate, InventoryUpdate
 
 
 def add_stock(db: Session, data: InventoryCreate):
-    """Add a new stock entry for a store-medicine pair."""
+    """Add a new stock entry for a store-medicine pair.
+
+    Accepts strip-based input and converts to units:
+        quantity_units = quantity (strips) × units_per_strip
+    """
     # Validate foreign keys
     if not db.query(Store).filter(Store.id == data.store_id).first():
         raise HTTPException(status_code=404, detail="Store not found")
@@ -30,7 +34,20 @@ def add_stock(db: Session, data: InventoryCreate):
             detail="Stock entry already exists for this store-medicine-batch combo. Use the update endpoint instead.",
         )
 
-    entry = Inventory(**data.model_dump())
+    # Convert strips → units
+    quantity_units = data.quantity * data.units_per_strip
+
+    entry = Inventory(
+        store_id=data.store_id,
+        medicine_id=data.medicine_id,
+        quantity=data.quantity,                # strips (legacy)
+        quantity_units=quantity_units,          # units (primary)
+        units_per_strip=data.units_per_strip,
+        batch_no=data.batch_no,
+        expiry_date=data.expiry_date,
+        mrp=data.mrp,
+        purchase_price=data.purchase_price,
+    )
     db.add(entry)
     db.commit()
     db.refresh(entry)
@@ -51,12 +68,25 @@ def get_stock_by_medicine(db: Session, medicine_id: int):
 
 
 def update_stock(db: Session, inventory_id: int, data: InventoryUpdate):
-    """Update the quantity of an existing stock entry."""
+    """Update stock of an existing inventory entry.
+
+    Accepts either:
+    - ``quantity`` (strips) → converts to units
+    - ``quantity_units`` (units) → used directly
+    """
     entry = db.query(Inventory).filter(Inventory.id == inventory_id).first()
     if not entry:
         raise HTTPException(status_code=404, detail="Inventory entry not found")
 
-    entry.quantity = data.quantity
+    ups = entry.units_per_strip or 10
+
+    if data.quantity_units is not None:
+        entry.quantity_units = data.quantity_units
+        entry.quantity = data.quantity_units // ups
+    elif data.quantity is not None:
+        entry.quantity = data.quantity
+        entry.quantity_units = data.quantity * ups
+
     db.commit()
     db.refresh(entry)
     return entry

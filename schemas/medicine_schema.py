@@ -6,6 +6,7 @@ class MedicineCreate(BaseModel):
     name: str
     salt: Optional[str] = None
     price: float
+    units_per_strip: int = 10
 
 
 class MedicineResponse(BaseModel):
@@ -13,6 +14,7 @@ class MedicineResponse(BaseModel):
     name: str
     salt: Optional[str] = None
     price: float
+    units_per_strip: int
 
     class Config:
         from_attributes = True

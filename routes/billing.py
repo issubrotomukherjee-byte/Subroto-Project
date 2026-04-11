@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from database.connection import get_db
 from dependencies.auth import get_current_user
+from models.medicine import Medicine
 from schemas.order_schema import (
     OrderCreate,
     OrderAddItems,
@@ -61,7 +62,10 @@ def place_order(
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    """Create a new order with items. Inventory is reduced automatically."""
+    """Create a new order with items. Inventory is reduced automatically.
+
+    Items can specify quantity as ``units``, ``strips``, or ``quantity`` (legacy).
+    """
     order = create_order(db, data)
     return _serialize_order(order, user)
 
@@ -105,34 +109,42 @@ def process_order(
 ):
     """Process a single-medicine order using FEFO batch selection.
 
-    Flow
-    ----
-    1. Fetch valid batches sorted by expiry (DB-level FEFO).
-    2. Allocate required quantity across batches (earliest first).
-    3. Calculate total using batch-level MRP (no weighted average).
-    4. Deduct stock from consumed batches.
-    5. Return role-based response:
-       - **Worker**: batch_no, quantity, mrp
-       - **Admin**: full details including purchase_price and profit
+    Accepts ``units``, ``strips``, or ``quantity`` (legacy, = units).
 
-    Designed for future integration with pick-to-light, RFID tray,
-    and gravity-based dispensing systems.
+    Response includes strip/loose_unit breakdown per batch.
+    Worker sees only batch_no, units, strips, mrp.
+    Admin sees full pricing including purchase_price and profit.
     """
     try:
+        # Resolve to units
+        medicine = db.query(Medicine).filter(Medicine.id == data.medicine_id).first()
+        if not medicine:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail=f"Medicine {data.medicine_id} not found")
+
+        required_units = data.get_units(medicine.units_per_strip)
+
         # 1. Fetch FEFO-sorted batches
         batches = get_available_batches(db, data.store_id, data.medicine_id)
 
-        # 2. Build allocation plan (pure logic, no DB mutation)
-        allocations = apply_fefo(batches, data.quantity)
+        # 2. Build allocation plan in units
+        allocations = apply_fefo(batches, required_units)
 
         # 3. Calculate totals using batch-level MRP
         totals = calculate_total(allocations)
 
-        # 4. Deduct stock
+        # 4. Deduct stock (quantity_units)
         reduce_stock(db, allocations)
         db.commit()
 
-        # 5. Build role-based response
+        # 5. Compute total strip breakdown
+        total_units = totals["total_quantity"]
+        # Use medicine-level units_per_strip for top-level breakdown
+        ups_display = medicine.units_per_strip
+        total_strips = total_units // ups_display
+        total_loose = total_units % ups_display
+
+        # 6. Build role-based response
         if user["role"] == "admin":
             admin_allocs = [
                 BatchAllocationAdminResponse(
@@ -141,14 +153,18 @@ def process_order(
                     expiry_date=a["expiry_date"],
                     mrp=a["mrp"],
                     purchase_price=a["purchase_price"],
-                    quantity=a["allocated_qty"],
+                    units=a["allocated_qty"],
+                    strips=a["allocated_qty"] // a["units_per_strip"],
+                    loose_units=a["allocated_qty"] % a["units_per_strip"],
                     profit=round((a["mrp"] - a["purchase_price"]) * a["allocated_qty"], 2),
                 )
                 for a in allocations
             ]
             return ProcessOrderAdminResponse(
                 medicine_id=data.medicine_id,
-                total_quantity=totals["total_quantity"],
+                total_units=total_units,
+                total_strips=total_strips,
+                total_loose_units=total_loose,
                 total_price=totals["total_price"],
                 total_cost=totals["total_purchase_cost"],
                 total_profit=totals["total_profit"],
@@ -158,18 +174,22 @@ def process_order(
             worker_allocs = [
                 BatchAllocationResponse(
                     batch_no=a["batch_no"],
-                    quantity=a["allocated_qty"],
+                    units=a["allocated_qty"],
+                    strips=a["allocated_qty"] // a["units_per_strip"],
+                    loose_units=a["allocated_qty"] % a["units_per_strip"],
                     mrp=a["mrp"],
                 )
                 for a in allocations
             ]
             return ProcessOrderResponse(
                 medicine_id=data.medicine_id,
-                total_quantity=totals["total_quantity"],
+                total_units=total_units,
+                total_strips=total_strips,
+                total_loose_units=total_loose,
                 total_price=totals["total_price"],
                 allocations=worker_allocs,
             )
 
-    except Exception as exc:
+    except Exception:
         db.rollback()
         raise

@@ -1,8 +1,8 @@
 """
 FEFO (First Expiry, First Out) — modular batch-selection engine.
 
-This module is the single source of truth for batch allocation logic.
-It is consumed by billing_service.py and the /orders/process endpoint.
+All internal logic operates in UNITS (tablets/capsules).
+The ``quantity_units`` field is the source of truth for stock levels.
 
 Designed for future integration with:
   - Pick-to-light hardware
@@ -29,15 +29,15 @@ def get_available_batches(
 ) -> List[Inventory]:
     """Fetch all non-expired batches with stock > 0, ordered by expiry ASC.
 
-    The FEFO ordering is enforced at the **database level** via
-    ``ORDER BY expiry_date ASC``, so callers never need to re-sort.
+    Uses ``quantity_units`` (units) as the stock availability check.
+    FEFO ordering is enforced at the **database level**.
 
     Raises
     ------
     HTTPException 404
         If the medicine_id does not exist.
     HTTPException 400
-        If zero valid (non-expired, qty > 0) batches are found.
+        If zero valid (non-expired, units > 0) batches are found.
     """
     medicine = db.query(Medicine).filter(Medicine.id == medicine_id).first()
     if not medicine:
@@ -51,7 +51,7 @@ def get_available_batches(
         .filter(
             Inventory.store_id == store_id,
             Inventory.medicine_id == medicine_id,
-            Inventory.quantity > 0,
+            Inventory.quantity_units > 0,
             Inventory.expiry_date >= date.today(),
         )
         .order_by(Inventory.expiry_date.asc())
@@ -71,49 +71,50 @@ def get_available_batches(
 
 def apply_fefo(
     batches: List[Inventory],
-    required_quantity: int,
+    required_units: int,
 ) -> list[dict]:
-    """Walk through FEFO-sorted batches and build an allocation plan.
+    """Walk through FEFO-sorted batches and build an allocation plan in UNITS.
 
     This is a **pure logic function** — it does NOT mutate the database
-    or the ORM objects.  It only reads batch attributes and returns a
-    list of allocation dicts.
+    or the ORM objects.  It only reads batch attributes.
 
     Each allocation dict contains::
 
         {
-            "batch_id":        int,   # inventory.id
-            "batch_no":        str,
-            "expiry_date":     date,
-            "mrp":             float,
-            "purchase_price":  float,
-            "allocated_qty":   int,
-            "inventory_ref":   Inventory,  # ORM reference for reduce_stock()
+            "batch_id":         int,
+            "batch_no":         str,
+            "expiry_date":      date,
+            "mrp":              float,
+            "purchase_price":   float,
+            "units_per_strip":  int,
+            "allocated_qty":    int,     # in UNITS
+            "inventory_ref":    Inventory,
         }
 
     Raises
     ------
     HTTPException 400
-        If total available qty across all batches < required_quantity.
+        If total available units across all batches < required_units.
     """
-    total_available = sum(b.quantity for b in batches)
-    if total_available < required_quantity:
+    total_available = sum(b.quantity_units for b in batches)
+    if total_available < required_units:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Insufficient stock. "
-                f"Requested {required_quantity}, available (non-expired) {total_available}."
+                f"Requested {required_units} units, "
+                f"available (non-expired) {total_available} units."
             ),
         )
 
     allocations: list[dict] = []
-    remaining = required_quantity
+    remaining = required_units
 
     for batch in batches:
         if remaining <= 0:
             break
 
-        take = min(batch.quantity, remaining)
+        take = min(batch.quantity_units, remaining)
         remaining -= take
 
         allocations.append({
@@ -122,8 +123,9 @@ def apply_fefo(
             "expiry_date": batch.expiry_date,
             "mrp": batch.mrp,
             "purchase_price": batch.purchase_price,
-            "allocated_qty": take,
-            "inventory_ref": batch,      # live ORM object for reduce_stock
+            "units_per_strip": batch.units_per_strip or 10,
+            "allocated_qty": take,          # in UNITS
+            "inventory_ref": batch,
         })
 
     return allocations
@@ -134,16 +136,16 @@ def apply_fefo(
 def calculate_total(allocations: list[dict]) -> dict:
     """Compute totals from a FEFO allocation plan.
 
-    Uses **batch-level MRP** — each batch prices its own consumed units,
-    then all are summed.  NO weighted average.
+    MRP and purchase_price are **per-unit** prices.
+    Uses batch-level pricing — NO weighted average.
 
     Returns::
 
         {
-            "total_price":         float,  # sum(mrp × qty)
-            "total_purchase_cost": float,  # sum(purchase_price × qty)
-            "total_profit":        float,  # total_price - total_purchase_cost
-            "total_quantity":      int,
+            "total_price":         float,
+            "total_purchase_cost": float,
+            "total_profit":        float,
+            "total_quantity":      int,    # in UNITS
         }
     """
     total_price = 0.0
@@ -167,13 +169,17 @@ def calculate_total(allocations: list[dict]) -> dict:
 # ── 4. STOCK UPDATE ────────────────────────────────────
 
 def reduce_stock(db: Session, allocations: list[dict]) -> None:
-    """Deduct allocated quantities from inventory batches.
+    """Deduct allocated units from inventory batches.
 
-    Uses the live ORM references stored in each allocation dict
-    so changes are tracked by the current SQLAlchemy session.
+    Deducts from ``quantity_units`` (the primary stock field).
+    Also updates the legacy ``quantity`` (strips) field for backward compat.
 
     The caller is responsible for ``db.commit()`` / ``db.rollback()``.
     """
     for alloc in allocations:
         batch: Inventory = alloc["inventory_ref"]
-        batch.quantity -= alloc["allocated_qty"]
+        batch.quantity_units -= alloc["allocated_qty"]
+
+        # Keep legacy strips field in sync (best-effort)
+        ups = batch.units_per_strip or 10
+        batch.quantity = batch.quantity_units // ups

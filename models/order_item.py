@@ -9,7 +9,7 @@ class OrderItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
     medicine_id = Column(Integer, ForeignKey("medicines.id"), nullable=False)
-    quantity = Column(Integer, nullable=False)
+    quantity = Column(Integer, nullable=False)           # units (tablets/capsules)
     unit_price = Column(Float, nullable=False)
     subtotal = Column(Float, nullable=False)
 

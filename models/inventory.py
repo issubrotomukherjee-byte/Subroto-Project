@@ -9,7 +9,14 @@ class Inventory(Base):
     id = Column(Integer, primary_key=True, index=True)
     store_id = Column(Integer, ForeignKey("stores.id"), nullable=False)
     medicine_id = Column(Integer, ForeignKey("medicines.id"), nullable=False)
-    quantity = Column(Integer, default=0)
+
+    # ── Strip-based fields (DEPRECATED — kept for backward compatibility) ──
+    quantity = Column(Integer, default=0)              # strips (legacy)
+
+    # ── Unit-based fields (PRIMARY — all internal logic uses these) ──
+    quantity_units = Column(Integer, nullable=True)    # total units (tablets/capsules)
+    units_per_strip = Column(Integer, nullable=True)   # units per strip for this batch
+
     batch_no = Column(String, nullable=False)
     expiry_date = Column(Date, nullable=False)
     mrp = Column(Float, nullable=False)
