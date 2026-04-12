@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from database.connection import get_db
-from schemas.medicine_schema import MedicineCreate, MedicineResponse
+from schemas.medicine_schema import MedicineCreate, MedicineResponse, MedicineSearchResponse
 from services.medicine_service import (
     list_medicines,
     get_medicine,
@@ -19,10 +19,17 @@ def read_all(db: Session = Depends(get_db)):
     return list_medicines(db)
 
 
-@router.get("/search", response_model=List[MedicineResponse])
-def search(name: str = Query(..., min_length=1, description="Medicine name to search"), db: Session = Depends(get_db)):
-    """Search medicines by name (case-insensitive partial match)."""
-    return search_medicines(db, name)
+@router.get("/search", response_model=List[MedicineSearchResponse])
+def search(
+    q: str = Query(..., min_length=1, description="Medicine name to search"),
+    db: Session = Depends(get_db),
+):
+    """Search medicines by name (case-insensitive partial match).
+
+    Returns top 10 results with ``id`` and ``name`` only — designed for
+    frontend autocomplete / search-select workflows.
+    """
+    return search_medicines(db, q)
 
 
 @router.get("/{medicine_id}", response_model=MedicineResponse)

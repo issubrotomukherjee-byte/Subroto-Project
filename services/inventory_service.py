@@ -15,24 +15,53 @@ def _enrich_response(entry: Inventory) -> Inventory:
     return entry
 
 
+def _resolve_or_create_medicine(db: Session, medicine_name: str, units_per_strip: int) -> Medicine:
+    """Find an existing medicine by name (case-insensitive) or create a new one.
+
+    Uses ``ilike`` for case-insensitive matching so "Paracetamol" and
+    "paracetamol" resolve to the same record.
+    """
+    medicine = (
+        db.query(Medicine)
+        .filter(Medicine.name.ilike(medicine_name))
+        .first()
+    )
+    if medicine:
+        return medicine
+
+    # Auto-create with sensible defaults (price 0 — can be updated later)
+    medicine = Medicine(
+        name=medicine_name.strip().title(),
+        price=0.0,
+        units_per_strip=units_per_strip,
+    )
+    db.add(medicine)
+    db.commit()
+    db.refresh(medicine)
+    return medicine
+
+
 def create_inventory(db: Session, data: InventoryCreate):
     """Add a new inventory entry (store + medicine + batch).
 
+    Resolves ``medicine_name`` to a medicine ID (auto-creates if new).
     Accepts strip-based input and converts to units internally:
         quantity_units = quantity (strips) × units_per_strip
     """
-    # Validate foreign keys
+    # Validate store exists
     if not db.query(Store).filter(Store.id == data.store_id).first():
         raise HTTPException(status_code=404, detail="Store not found")
-    if not db.query(Medicine).filter(Medicine.id == data.medicine_id).first():
-        raise HTTPException(status_code=404, detail="Medicine not found")
+
+    # Resolve medicine by name (find or create)
+    medicine = _resolve_or_create_medicine(db, data.medicine_name, data.units_per_strip)
+    medicine_id = medicine.id
 
     # Check for duplicate (same store + medicine + batch)
     existing = (
         db.query(Inventory)
         .filter(
             Inventory.store_id == data.store_id,
-            Inventory.medicine_id == data.medicine_id,
+            Inventory.medicine_id == medicine_id,
             Inventory.batch_no == data.batch_no,
         )
         .first()
@@ -48,7 +77,7 @@ def create_inventory(db: Session, data: InventoryCreate):
 
     entry = Inventory(
         store_id=data.store_id,
-        medicine_id=data.medicine_id,
+        medicine_id=medicine_id,
         quantity=data.quantity,                # strips (legacy)
         quantity_units=quantity_units,          # units (primary)
         units_per_strip=data.units_per_strip,

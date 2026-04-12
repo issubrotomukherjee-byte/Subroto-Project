@@ -17,11 +17,16 @@ def get_medicine(db: Session, medicine_id: int):
     return medicine
 
 
-def search_medicines(db: Session, name: str):
-    """Case-insensitive partial match on medicine name."""
+def search_medicines(db: Session, name: str, limit: int = 10):
+    """Case-insensitive partial match on medicine name.
+
+    Returns at most ``limit`` results, ordered alphabetically.
+    """
     return (
         db.query(Medicine)
         .filter(Medicine.name.ilike(f"%{name}%"))
+        .order_by(Medicine.name)
+        .limit(limit)
         .all()
     )
 

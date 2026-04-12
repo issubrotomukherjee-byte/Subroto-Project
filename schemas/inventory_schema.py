@@ -6,10 +6,12 @@ from typing import Optional
 class InventoryCreate(BaseModel):
     """Accept inventory in strips. Backend converts to units internally.
 
+    Frontend sends ``medicine_name`` instead of ``medicine_id``.
+    Backend auto-resolves or creates the medicine record.
     Requires ``units_per_strip`` so each batch can have its own strip size.
     """
+    medicine_name: str
     store_id: int
-    medicine_id: int
     quantity: int                     # strips
     units_per_strip: int = 10         # units per strip for this batch
     batch_no: str

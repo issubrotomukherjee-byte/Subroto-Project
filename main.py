@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from database.connection import engine
 from database.base import Base
 from routes import medicine, inventory, billing, store as store_routes, customer, loyalty
@@ -29,7 +30,13 @@ app = FastAPI(
     description="Pharmacy Point-of-Sale System",
     version="0.1.0",
 )
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # Register route modules
 app.include_router(medicine.router, prefix="/api/medicines", tags=["Medicines"])
 app.include_router(inventory.router, prefix="/api/inventory", tags=["Inventory"])

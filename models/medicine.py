@@ -7,7 +7,7 @@ class Medicine(Base):
     __tablename__ = "medicines"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False, index=True)
+    name = Column(String, nullable=False, index=True, unique=True)
     salt = Column(String, nullable=True)
     price = Column(Float, nullable=False)
     units_per_strip = Column(Integer, default=10, nullable=False)
