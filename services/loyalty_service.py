@@ -66,6 +66,50 @@ def add_points(db: Session, customer_id: int, order_total: float, order_id: int)
     return loyalty
 
 
+def redeem_points_for_order(
+    db: Session, customer_id: int, points_requested: int, max_discount: float, order_id: int,
+) -> dict:
+    """Redeem loyalty points during order placement.
+
+    Unlike ``redeem_points()`` this does NOT commit — the caller
+    (billing_service) manages the transaction boundary.
+
+    Args:
+        points_requested: how many points the customer wants to redeem.
+        max_discount: the ₹ cap (e.g. 20% of after-discount subtotal).
+        order_id: for the audit trail reason.
+
+    Returns:
+        {"points_redeemed": int, "discount_amount": float}
+    """
+    loyalty = get_or_create_loyalty(db, customer_id)
+
+    # Cap by available balance
+    redeemable = min(points_requested, loyalty.points)
+
+    # Cap by ₹ max (1 point = ₹ REDEMPTION_VALUE)
+    max_points_by_value = int(max_discount / REDEMPTION_VALUE)
+    redeemable = min(redeemable, max_points_by_value)
+
+    if redeemable <= 0:
+        return {"points_redeemed": 0, "discount_amount": 0.0}
+
+    loyalty.points -= redeemable
+    loyalty.membership_type = _calculate_tier(loyalty.points)
+
+    discount_amount = redeemable * REDEMPTION_VALUE
+
+    txn = LoyaltyTransaction(
+        loyalty_id=loyalty.id,
+        points_added=0,
+        points_used=redeemable,
+        reason=f"Redeemed on Order #{order_id}",
+    )
+    db.add(txn)
+
+    return {"points_redeemed": redeemable, "discount_amount": discount_amount}
+
+
 def redeem_points(db: Session, customer_id: int, points_to_redeem: int):
     """Redeem loyalty points. Returns info about the redemption."""
     loyalty = get_or_create_loyalty(db, customer_id)

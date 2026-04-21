@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database.connection import engine
 from database.base import Base
-from routes import medicine, inventory, billing, store as store_routes, customer, loyalty
+from routes import medicine, inventory, billing, store as store_routes, customer, loyalty, inventory_intelligence, reports, purchase
 
 # Import every model so Base.metadata knows about all tables
 from models import (  # noqa: F401
@@ -15,6 +15,9 @@ from models import (  # noqa: F401
     order_item_batch,
     customer_loyalty,
     loyalty_transaction,
+    billing_settings,
+    inventory_adjustment,
+    purchase as purchase_model,
 )
 
 # Create all database tables
@@ -44,6 +47,21 @@ app.include_router(billing.router, prefix="/api/orders", tags=["Orders"])
 app.include_router(store_routes.router, prefix="/api/stores", tags=["Stores"])
 app.include_router(customer.router, prefix="/api/customers", tags=["Customers"])
 app.include_router(loyalty.router, prefix="/api/loyalty", tags=["Loyalty"])
+app.include_router(
+    inventory_intelligence.router,
+    prefix="/api/inventory",
+    tags=["Inventory Intelligence"],
+)
+app.include_router(
+    reports.router,
+    prefix="/api/reports",
+    tags=["Reports"],
+)
+app.include_router(
+    purchase.router,
+    prefix="/api/purchase",
+    tags=["Purchase"],
+)
 
 
 @app.get("/", tags=["Health"])

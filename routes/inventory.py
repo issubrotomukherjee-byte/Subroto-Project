@@ -1,15 +1,21 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from typing import List
 from database.connection import get_db
-from dependencies.auth import get_current_user
+from dependencies.auth import get_current_user, require_admin
 from schemas.inventory_schema import (
     InventoryCreate,
     InventoryUpdate,
     InventoryResponse,
     InventoryAdminResponse,
 )
+from schemas.inventory_adjustment_schema import (
+    InventoryAdjustRequest,
+    InventoryAdjustResponse,
+    AdjustmentLogResponse,
+)
 from services.inventory_service import create_inventory, get_inventory_by_medicine, update_inventory
+from services.inventory_adjustment_service import adjust_inventory, get_adjustment_log
 
 router = APIRouter()
 
@@ -32,6 +38,8 @@ def add_inventory(data: InventoryCreate, db: Session = Depends(get_db)):
     Backend converts to units internally.
     """
     entry = create_inventory(db, data)
+    db.commit()
+    db.refresh(entry)
     return _enrich_inventory_response(entry, InventoryResponse)
 
 
@@ -61,4 +69,66 @@ def modify_inventory(inventory_id: int, data: InventoryUpdate, db: Session = Dep
     Accepts either ``quantity`` (strips) or ``quantity_units`` (units).
     """
     entry = update_inventory(db, inventory_id, data)
+    db.commit()
+    db.refresh(entry)
     return _enrich_inventory_response(entry, InventoryResponse)
+
+
+# ── Stock Adjustment (admin-only) ────────────────────────
+
+@router.post(
+    "/adjust",
+    response_model=InventoryAdjustResponse,
+    status_code=200,
+    summary="Adjust stock (increase/decrease)",
+)
+def adjust_stock(
+    data: InventoryAdjustRequest,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Manually adjust stock for an inventory batch. **Admin-only.**
+
+    Use cases: damaged goods, physical count corrections, returns,
+    stock write-offs, or manual replenishment.
+
+    - ``adjustment_type``: ``"increase"`` or ``"decrease"``
+    - ``quantity``: positive integer (units)
+    - ``reason``: mandatory text (audit trail)
+
+    Stock cannot go below zero. Every adjustment is logged to an
+    immutable audit table with before/after snapshots.
+
+    Returns the full adjustment record with updated stock levels.
+    """
+    require_admin(user)
+    admin_name = user.get("name", "admin")
+    return adjust_inventory(db, data, admin_name)
+
+
+# ── Adjustment History (admin-only) ──────────────────────
+
+@router.get(
+    "/adjustments/store/{store_id}",
+    response_model=AdjustmentLogResponse,
+    summary="Adjustment audit log",
+)
+def read_adjustment_log(
+    store_id: int,
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    medicine_id: int = Query(None, description="Optional: filter by medicine ID"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """View paginated adjustment history for a store. **Admin-only.**
+
+    Sorted newest-first. Optionally filtered by ``medicine_id``.
+    """
+    require_admin(user)
+    return get_adjustment_log(
+        db, store_id,
+        page=page, page_size=page_size,
+        medicine_id=medicine_id,
+    )
+

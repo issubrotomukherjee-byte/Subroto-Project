@@ -1,6 +1,6 @@
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, model_validator, field_validator
 from typing import Optional, List
-from datetime import date
+from datetime import date, datetime
 
 
 # ── Request schemas ──────────────────────────────────────
@@ -10,7 +10,7 @@ class OrderItemCreate(BaseModel):
 
     - ``units``: number of tablets/capsules directly
     - ``strips``: converted to units using medicine's units_per_strip
-    - ``quantity``: legacy field, treated as strips for backward compat
+    - ``quantity``: legacy field, treated as units for backward compat
     """
     medicine_id: int
     units: Optional[int] = None
@@ -27,24 +27,42 @@ class OrderItemCreate(BaseModel):
         return self
 
     def get_units(self, units_per_strip: int) -> int:
-        """Resolve the final unit count.
-
-        - ``units`` → used directly
-        - ``strips`` → strips × units_per_strip
-        - ``quantity`` → treated as units (backward compat)
-        """
+        """Resolve the final unit count."""
         if self.units is not None:
             return self.units
         if self.strips is not None:
             return self.strips * units_per_strip
-        # Legacy: quantity = units
         return self.quantity
 
 
 class OrderCreate(BaseModel):
+    """Production-grade order placement request.
+
+    - ``customer_phone``: auto-finds or creates customer
+    - ``payment_method``: ``"cash"`` or ``"upi"``
+    - ``redeem_loyalty_points``: points to redeem (capped by settings)
+    - Discount is applied automatically from admin-configured settings
+    """
     store_id: int
-    customer_id: Optional[int] = None
+    customer_phone: Optional[str] = None
+    payment_method: str = "cash"
+    redeem_loyalty_points: Optional[int] = None
     items: List[OrderItemCreate]
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment_method(cls, v):
+        v = v.lower().strip()
+        if v not in ("cash", "upi"):
+            raise ValueError("payment_method must be 'cash' or 'upi'")
+        return v
+
+    @field_validator("redeem_loyalty_points")
+    @classmethod
+    def validate_redeem(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("redeem_loyalty_points must be >= 0")
+        return v
 
 
 class OrderAddItems(BaseModel):
@@ -107,7 +125,15 @@ class OrderResponse(BaseModel):
     id: int
     store_id: int
     customer_id: Optional[int] = None
+    payment_method: Optional[str] = None
+    subtotal: Optional[float] = None
+    discount_percent: Optional[float] = None
+    discount_amount: Optional[float] = None
+    loyalty_points_redeemed: Optional[int] = None
+    loyalty_discount: Optional[float] = None
+    net_amount: Optional[float] = None
     total_amount: float
+    loyalty_points_earned: Optional[int] = None
     items: List[OrderItemResponse] = []
 
     class Config:
@@ -119,7 +145,15 @@ class OrderAdminResponse(BaseModel):
     id: int
     store_id: int
     customer_id: Optional[int] = None
+    payment_method: Optional[str] = None
+    subtotal: Optional[float] = None
+    discount_percent: Optional[float] = None
+    discount_amount: Optional[float] = None
+    loyalty_points_redeemed: Optional[int] = None
+    loyalty_discount: Optional[float] = None
+    net_amount: Optional[float] = None
     total_amount: float
+    loyalty_points_earned: Optional[int] = None
     items: List[OrderItemAdminResponse] = []
 
     class Config:
@@ -171,3 +205,38 @@ class ProcessOrderAdminResponse(BaseModel):
     total_cost: float
     total_profit: float
     allocations: List[BatchAllocationAdminResponse]
+
+
+# ── Invoice response ────────────────────────────────────
+
+class InvoiceItemResponse(BaseModel):
+    medicine_name: str
+    quantity: int            # units
+    unit_price: float        # MRP per unit
+    subtotal: float          # MRP × qty
+
+    class Config:
+        from_attributes = True
+
+
+class InvoiceResponse(BaseModel):
+    """Printable invoice JSON for GET /api/orders/{id}/invoice."""
+    order_id: int
+    store_name: str
+    store_address: Optional[str] = None
+    store_phone: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    payment_method: str
+
+    items: List[InvoiceItemResponse]
+
+    subtotal: float
+    discount_percent: float
+    discount_amount: float
+    loyalty_points_redeemed: int
+    loyalty_discount: float
+    net_amount: float
+    loyalty_points_earned: int
+
+    created_at: Optional[datetime] = None

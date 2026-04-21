@@ -17,6 +17,17 @@ def create_customer(db: Session, data: CustomerCreate):
     return customer
 
 
+def find_or_create_by_phone(db: Session, phone: str) -> Customer:
+    """Look up customer by phone.  Auto-create as 'Walk-in' if not found."""
+    customer = db.query(Customer).filter(Customer.phone == phone).first()
+    if customer:
+        return customer
+    customer = Customer(name="Walk-in", phone=phone)
+    db.add(customer)
+    db.flush()  # populate id — caller manages commit
+    return customer
+
+
 def list_customers(db: Session):
     """Return all customers."""
     return db.query(Customer).all()

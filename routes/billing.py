@@ -1,8 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from typing import List
 from database.connection import get_db
-from dependencies.auth import get_current_user
+from dependencies.auth import get_current_user, require_admin
 from models.medicine import Medicine
 from schemas.order_schema import (
     OrderCreate,
@@ -10,11 +9,17 @@ from schemas.order_schema import (
     OrderResponse,
     OrderAdminResponse,
     OrderTotalResponse,
+    InvoiceResponse,
     ProcessOrderRequest,
     ProcessOrderResponse,
     ProcessOrderAdminResponse,
     BatchAllocationResponse,
     BatchAllocationAdminResponse,
+)
+from schemas.billing_settings_schema import (
+    BillingSettingsUpdate,
+    BillingSettingsResponse,
+    BillingSettingsAuditListResponse,
 )
 from services.billing_service import (
     create_order,
@@ -22,6 +27,12 @@ from services.billing_service import (
     get_order,
     get_order_total,
     list_orders,
+    get_invoice,
+)
+from services.billing_settings_service import (
+    get_settings,
+    update_settings,
+    get_audit_log,
 )
 from services.fefo_service import (
     get_available_batches,
@@ -42,7 +53,38 @@ def _serialize_order(order, user: dict):
     return OrderResponse.model_validate(order)
 
 
-# ── existing endpoints ───────────────────────────────────
+# ── Settings endpoints (admin-only) ─────────────────────
+
+@router.get("/settings", response_model=BillingSettingsResponse)
+def read_settings(db: Session = Depends(get_db)):
+    """View current billing settings (any role)."""
+    return get_settings(db)
+
+
+@router.put("/settings", response_model=BillingSettingsResponse)
+def update_billing_settings(
+    data: BillingSettingsUpdate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Update billing settings. Admin-only. Fully audited."""
+    require_admin(user)
+    admin_name = user.get("name", "admin")
+    return update_settings(db, data, admin_name)
+
+
+@router.get("/settings/audit", response_model=BillingSettingsAuditListResponse)
+def read_settings_audit(
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """View full audit trail of billing settings changes. Admin-only."""
+    require_admin(user)
+    audits = get_audit_log(db)
+    return {"audits": audits}
+
+
+# ── Order endpoints ─────────────────────────────────────
 
 @router.get("/")
 def read_orders(
@@ -62,9 +104,14 @@ def place_order(
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    """Create a new order with items. Inventory is reduced automatically.
+    """Place a new order with production-grade billing.
 
-    Items can specify quantity as ``units``, ``strips``, or ``quantity`` (legacy).
+    - Auto-resolves or creates customer from ``customer_phone``
+    - Applies admin-configured discount from billing settings
+    - Redeems loyalty points (capped by ``max_loyalty_redemption_percent``)
+    - Earns loyalty points on final payable
+    - Uses FEFO stock deduction from inventory batches
+    - Prevents sale if insufficient stock
     """
     order = create_order(db, data)
     return _serialize_order(order, user)
@@ -99,6 +146,12 @@ def read_total(order_id: int, db: Session = Depends(get_db)):
     return get_order_total(db, order_id)
 
 
+@router.get("/{order_id}/invoice", response_model=InvoiceResponse)
+def read_invoice(order_id: int, db: Session = Depends(get_db)):
+    """Return printable invoice JSON for an order."""
+    return get_invoice(db, order_id)
+
+
 # ── FEFO process endpoint ───────────────────────────────
 
 @router.post("/process", status_code=200)
@@ -110,13 +163,11 @@ def process_order(
     """Process a single-medicine order using FEFO batch selection.
 
     Accepts ``units``, ``strips``, or ``quantity`` (legacy, = units).
-
     Response includes strip/loose_unit breakdown per batch.
     Worker sees only batch_no, units, strips, mrp.
     Admin sees full pricing including purchase_price and profit.
     """
     try:
-        # Resolve to units
         medicine = db.query(Medicine).filter(Medicine.id == data.medicine_id).first()
         if not medicine:
             from fastapi import HTTPException
@@ -124,27 +175,17 @@ def process_order(
 
         required_units = data.get_units(medicine.units_per_strip)
 
-        # 1. Fetch FEFO-sorted batches
         batches = get_available_batches(db, data.store_id, data.medicine_id)
-
-        # 2. Build allocation plan in units
         allocations = apply_fefo(batches, required_units)
-
-        # 3. Calculate totals using batch-level MRP
         totals = calculate_total(allocations)
-
-        # 4. Deduct stock (quantity_units)
         reduce_stock(db, allocations)
         db.commit()
 
-        # 5. Compute total strip breakdown
         total_units = totals["total_quantity"]
-        # Use medicine-level units_per_strip for top-level breakdown
         ups_display = medicine.units_per_strip
         total_strips = total_units // ups_display
         total_loose = total_units % ups_display
 
-        # 6. Build role-based response
         if user["role"] == "admin":
             admin_allocs = [
                 BatchAllocationAdminResponse(

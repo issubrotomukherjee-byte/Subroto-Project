@@ -1,3 +1,12 @@
+"""
+Inventory Service — stock creation, lookup, and update logic.
+
+IMPORTANT: This service NEVER commits or rolls back.
+Transaction management is the caller's responsibility.
+All functions use db.flush() to persist changes within the
+current transaction and obtain auto-generated IDs.
+"""
+
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 from models.inventory import Inventory
@@ -36,8 +45,7 @@ def _resolve_or_create_medicine(db: Session, medicine_name: str, units_per_strip
         units_per_strip=units_per_strip,
     )
     db.add(medicine)
-    db.commit()
-    db.refresh(medicine)
+    db.flush()
     return medicine
 
 
@@ -47,6 +55,8 @@ def create_inventory(db: Session, data: InventoryCreate):
     Resolves ``medicine_name`` to a medicine ID (auto-creates if new).
     Accepts strip-based input and converts to units internally:
         quantity_units = quantity (strips) × units_per_strip
+
+    NOTE: Does NOT commit. Caller must commit the transaction.
     """
     # Validate store exists
     if not db.query(Store).filter(Store.id == data.store_id).first():
@@ -87,8 +97,7 @@ def create_inventory(db: Session, data: InventoryCreate):
         purchase_price=data.purchase_price,
     )
     db.add(entry)
-    db.commit()
-    db.refresh(entry)
+    db.flush()
     return entry
 
 
@@ -111,6 +120,8 @@ def update_inventory(db: Session, inventory_id: int, data: InventoryUpdate):
     Accepts either:
     - ``quantity`` (strips) → converts to units
     - ``quantity_units`` (units) → used directly
+
+    NOTE: Does NOT commit. Caller must commit the transaction.
     """
     entry = db.query(Inventory).filter(Inventory.id == inventory_id).first()
     if not entry:
@@ -127,6 +138,5 @@ def update_inventory(db: Session, inventory_id: int, data: InventoryUpdate):
         entry.quantity = data.quantity
         entry.quantity_units = data.quantity * ups
 
-    db.commit()
-    db.refresh(entry)
+    db.flush()
     return entry
