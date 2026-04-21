@@ -13,6 +13,7 @@ from schemas.purchase_schema import (
     SupplierSummaryResponse,
     TopSuppliersResponse,
     PriceHistoryResponse,
+    SmartSupplierResponse,
 )
 from services.purchase_service import (
     create_purchase,
@@ -21,6 +22,7 @@ from services.purchase_service import (
     supplier_summary,
     top_suppliers,
     price_history,
+    smart_supplier,
 )
 
 router = APIRouter()
@@ -104,6 +106,27 @@ def read_price_history(
         page=page,
         page_size=page_size,
     )
+
+
+@router.get(
+    "/smart-supplier/{medicine_id}",
+    response_model=SmartSupplierResponse,
+    summary="Smart supplier lookup for a medicine",
+)
+def read_smart_supplier(
+    medicine_id: int,
+    store_id: Optional[int] = Query(None, description="Filter by store"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """All suppliers who have supplied a specific medicine, ranked by recency.
+
+    Returns per-supplier stats: total invoices, units supplied, avg/min/max
+    price, and the **latest unit price** (from the most recent purchase,
+    not the highest price). Admin-only.
+    """
+    require_admin(user)
+    return smart_supplier(db, medicine_id, store_id=store_id)
 
 
 @router.get(

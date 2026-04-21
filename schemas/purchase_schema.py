@@ -207,3 +207,19 @@ class PriceHistoryResponse(BaseModel):
     pagination: PaginationMeta
     items: List[PriceHistoryItem] = []
 
+
+# ── Smart Supplier Schema ────────────────────────────────
+
+class SmartSupplierResponse(BaseModel):
+    """Smart supplier analysis for a specific medicine."""
+    medicine_id: int
+    medicine_name: str
+    store_id: Optional[int] = None
+    last_purchase_price: float
+    avg_price: float
+    best_supplier: str
+    best_price: float
+    price_trend: str                       # "increasing" | "decreasing" | "stable"
+    savings_per_unit: float
+    recommendation: str
+

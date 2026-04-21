@@ -588,3 +588,141 @@ def price_history(
         "items": items,
     }
 
+
+# ── Smart Supplier ───────────────────────────────────────
+
+def smart_supplier(
+    db: Session,
+    medicine_id: int,
+    store_id: Optional[int] = None,
+) -> dict:
+    """Smart supplier analysis for a medicine.
+
+    Two SQL queries, zero loops:
+      Q1 — overall avg_price + last_purchase_price (ORDER BY + LIMIT 1)
+      Q2 — per-supplier GROUP BY with correlated subquery for latest price
+
+    best_supplier = lowest avg price; tie-break = latest invoice_date.
+    best_price    = that supplier's most recent price (NOT max price).
+    """
+    from sqlalchemy import func as sqla_func, select
+
+    # Validate medicine
+    medicine = db.query(Medicine).filter(Medicine.id == medicine_id).first()
+    if not medicine:
+        raise HTTPException(status_code=404, detail=f"Medicine {medicine_id} not found")
+
+    # Base filter
+    base_filter = [PurchaseItem.medicine_id == medicine_id]
+    if store_id is not None:
+        _validate_store(db, store_id)
+        base_filter.append(Purchase.store_id == store_id)
+
+    # ── Q1: overall avg + last purchase price ────────────
+    last_row = (
+        db.query(
+            PurchaseItem.purchase_price,
+            Purchase.supplier_name,
+        )
+        .join(Purchase, PurchaseItem.purchase_id == Purchase.id)
+        .filter(*base_filter)
+        .order_by(Purchase.invoice_date.desc(), Purchase.created_at.desc())
+        .limit(1)
+        .first()
+    )
+
+    if not last_row:
+        raise HTTPException(status_code=404, detail="No purchase data found")
+
+    last_purchase_price = last_row.purchase_price
+
+    avg_row = (
+        db.query(
+            sqla_func.avg(PurchaseItem.purchase_price).label("avg_price"),
+        )
+        .join(Purchase, PurchaseItem.purchase_id == Purchase.id)
+        .filter(*base_filter)
+        .first()
+    )
+    avg_price = round(avg_row.avg_price or 0, 2)
+
+    # ── Q2: per-supplier GROUP BY + correlated subquery ──
+    # Table aliases so the correlated subquery doesn't collide
+    # with the outer query's PurchaseItem / Purchase tables.
+    pi_sub = PurchaseItem.__table__.alias("pi_sub")
+    p_sub = Purchase.__table__.alias("p_sub")
+
+    sub_where = [
+        pi_sub.c.medicine_id == medicine_id,
+        p_sub.c.supplier_name == Purchase.__table__.c.supplier_name,
+    ]
+    if store_id is not None:
+        sub_where.append(p_sub.c.store_id == store_id)
+
+    supplier_latest_sq = (
+        select(pi_sub.c.purchase_price)
+        .select_from(pi_sub.join(p_sub, pi_sub.c.purchase_id == p_sub.c.id))
+        .where(*sub_where)
+        .order_by(p_sub.c.invoice_date.desc(), p_sub.c.created_at.desc())
+        .limit(1)
+        .correlate(Purchase.__table__)
+        .scalar_subquery()
+        .label("last_price_per_supplier")
+    )
+
+    suppliers = (
+        db.query(
+            Purchase.supplier_name,
+            sqla_func.avg(PurchaseItem.purchase_price).label("avg_pp"),
+            sqla_func.max(Purchase.invoice_date).label("last_date"),
+            supplier_latest_sq,
+        )
+        .join(Purchase, PurchaseItem.purchase_id == Purchase.id)
+        .filter(*base_filter)
+        .group_by(Purchase.supplier_name)
+        .order_by(
+            sqla_func.avg(PurchaseItem.purchase_price).asc(),
+            sqla_func.max(Purchase.invoice_date).desc(),
+        )
+        .all()
+    )
+
+    # Best supplier = first row (lowest avg, latest date tie-break)
+    best = suppliers[0]
+    best_supplier = best.supplier_name
+    best_price = round(best.last_price_per_supplier, 2)
+
+    # ── Derived fields ───────────────────────────────────
+    if last_purchase_price < avg_price:
+        price_trend = "decreasing"
+    elif last_purchase_price > avg_price:
+        price_trend = "increasing"
+    else:
+        price_trend = "stable"
+
+    savings_per_unit = round(last_purchase_price - best_price, 2)
+
+    if savings_per_unit > 0:
+        recommendation = (
+            f"Switch to {best_supplier} to save ₹{savings_per_unit:.2f}/unit"
+        )
+    elif len(suppliers) == 1:
+        recommendation = f"{best_supplier} is the only supplier on record"
+    else:
+        recommendation = "Current pricing is optimal"
+
+    return {
+        "medicine_id": medicine_id,
+        "medicine_name": medicine.name,
+        "store_id": store_id,
+        "last_purchase_price": round(last_purchase_price, 2),
+        "avg_price": avg_price,
+        "best_supplier": best_supplier,
+        "best_price": best_price,
+        "price_trend": price_trend,
+        "savings_per_unit": savings_per_unit,
+        "recommendation": recommendation,
+    }
+
+
+
