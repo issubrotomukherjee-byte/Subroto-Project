@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from database.connection import engine
 from database.base import Base
 from routes import medicine, inventory, billing, store as store_routes, customer, loyalty, inventory_intelligence, reports, purchase
+from routes.salt import router as salt_router, medicine_salt_router
 
 # Import every model so Base.metadata knows about all tables
 from models import (  # noqa: F401
@@ -19,6 +20,7 @@ from models import (  # noqa: F401
     inventory_adjustment,
     purchase as purchase_model,
 )
+from models import salt as salt_model, medicine_salt as medicine_salt_model  # noqa: F401
 
 # Create all database tables
 # NOTE: create_all() only creates NEW tables. It does NOT update existing
@@ -62,6 +64,8 @@ app.include_router(
     prefix="/api/purchase",
     tags=["Purchase"],
 )
+app.include_router(salt_router, prefix="/api/salts", tags=["Salts"])
+app.include_router(medicine_salt_router, prefix="/api/medicine-salts", tags=["Medicine Salts"])
 
 
 @app.get("/", tags=["Health"])
